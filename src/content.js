@@ -5,6 +5,7 @@
   const STATUS_ID = "__xposter_status__";
   const IMPORT_BUTTON_ID = "__xposter_import_button__";
   const DROP_HINT_ID = "__xposter_drop_hint__";
+  const SIDEPANEL_DRAFT_STORAGE_KEY = "xposter_sidepanel_draft";
   const ORIGINAL_IMPORTER_MARKERS = [
     { label: "original import button", selector: "#__xmp_import_btn__, [id*='__xmp_import_btn__']" },
     { label: "original vault prompt", selector: "#__xmp_vault_prompt__" },
@@ -29,7 +30,8 @@
   const state = {
     busy: false,
     lastSummary: null,
-    mainReady: false
+    mainReady: false,
+    currentMarkdown: ""
   };
 
   function isArticleRoute() {
@@ -277,6 +279,7 @@
   async function importMarkdown(markdown, origin = "manual") {
     if (state.busy) return { ok: false, error: "Import already running" };
     state.busy = true;
+    state.currentMarkdown = markdown;
     const startedAt = performance.now();
     showStatus("Preparing Markdown...", "work");
     try {
@@ -290,8 +293,6 @@
       const counts = shared.segmentCounts(segments);
       broadcast({ type: "parsed", parsed: { title: parsed.title, cover: parsed.cover, counts } });
 
-      if (!(await waitForMainReady())) throw new Error("X editor bridge is not ready");
-
       const localImages = segments.filter((segment) => segment.type === "image" && shared.isLocalImageSource(segment.source));
       const coverSource = limitedParsed.cover || "";
       const coverSegment = coverSource && !segments.some(
@@ -299,6 +300,10 @@
       )
         ? { type: "image", source: coverSource, alt: "cover" }
         : null;
+      await ensureRemoteImageAccessForImport(segments, coverSegment);
+
+      if (!(await waitForMainReady())) throw new Error("X editor bridge is not ready");
+
       const coverLocalImage = coverSegment && shared.isLocalImageSource(coverSegment.source) ? coverSegment : null;
       if (localImages.length || coverLocalImage) {
         await ensureVaultForLocalImages(localImages.length + (coverLocalImage ? 1 : 0));
@@ -311,6 +316,13 @@
       const mediaFailures = collectMediaFailures(imageMap, "image")
         .concat(coverResult && !coverResult.ok ? collectMediaFailures(new Map([[coverSegment, coverResult]]), "image") : [])
         .concat(collectMediaFailures(tableMap, "table"));
+      const remoteImageFailures = mediaFailures.filter(isRemoteImageFailure);
+      if (remoteImageFailures.length) {
+        await openSidePanelForRemoteImages();
+        const error = new Error(formatRemoteImagePreparationError(remoteImageFailures));
+        error.mediaFailures = remoteImageFailures;
+        throw error;
+      }
       const pastePlan = shared.buildPastePlan(segments, imageMap, tableMap, {
         coverSource,
         coverResult
@@ -347,6 +359,7 @@
       return { ok: false, error: message };
     } finally {
       state.busy = false;
+      state.currentMarkdown = "";
     }
   }
 
@@ -362,6 +375,90 @@
     if (!result.ok && !result.skipped) {
       throw new Error(result.error || "Local image folder was not selected");
     }
+  }
+
+  async function ensureRemoteImageAccessForImport(segments, coverSegment = null) {
+    const remoteImages = uniqueRemoteImageSegments(segments, coverSegment);
+    if (!remoteImages.length) return { ok: true, total: 0 };
+    const origins = Array.from(
+      new Set(
+        remoteImages
+          .map((segment) => imageOrigin(segment.source))
+          .filter(Boolean)
+      )
+    );
+    if (!origins.length) return { ok: true, total: remoteImages.length };
+    let status = null;
+    try {
+      status = await chrome.runtime.sendMessage({
+        type: "xposter:remote-image-permission-status",
+        origins
+      });
+    } catch (error) {
+      status = { ok: false, error: error?.message || String(error), missing: origins };
+    }
+    const missing = status?.missing?.length ? status.missing : [];
+    if (!missing.length) return { ok: true, total: remoteImages.length, origins };
+    await openSidePanelForRemoteImages();
+    const hostList = missing.map(hostLabel).join(", ");
+    const error = new Error(
+      `${remoteImages.length} web image(s) need one Chrome permission before xPoster can upload them. The side panel is open: click Allow image website for ${hostList}, then Write article again.`
+    );
+    error.permissionRequired = true;
+    error.mediaFailures = remoteImages.map((segment, index) => ({
+      kind: "image",
+      index: index + 1,
+      source: segment.source,
+      origin: imageOrigin(segment.source),
+      fileName: shared.guessFileName(segment.source, `image-${index + 1}`),
+      error: "Chrome image-site permission required",
+      permissionRequired: true
+    }));
+    throw error;
+  }
+
+  function uniqueRemoteImageSegments(segments, coverSegment = null) {
+    const seen = new Set();
+    return (segments || [])
+      .concat(coverSegment ? [coverSegment] : [])
+      .filter((segment) => segment?.type === "image" && isRemoteHttpImageSource(segment.source))
+      .filter((segment) => {
+        const key = String(segment.source || "");
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }
+
+  function isRemoteImageFailure(failure) {
+    return failure?.kind === "image" && isRemoteHttpImageSource(failure.source);
+  }
+
+  function isRemoteHttpImageSource(source) {
+    return /^https?:\/\//i.test(String(source || "").trim());
+  }
+
+  function formatRemoteImagePreparationError(failures) {
+    const first = failures[0] || {};
+    const count = failures.length || 1;
+    const origin = first.origin || imageOrigin(first.source) || "the image website";
+    const fileName = first.fileName || shared.guessFileName(first.source || "", "image");
+    return `${count} web image(s) could not be downloaded for upload. First failed: ${fileName} from ${origin}. ${first.error || "Image download failed"} The article was not written yet, so the image links do not become a broken draft. Open the side panel, allow the image website or replace the image URL, then Write article again.`;
+  }
+
+  async function openSidePanelForRemoteImages() {
+    await saveDraftForSidePanel();
+    try {
+      await chrome.runtime.sendMessage({ type: "xposter:open-side-panel" });
+    } catch {}
+  }
+
+  async function saveDraftForSidePanel(markdown = "") {
+    const draft = String(markdown || state.currentMarkdown || "");
+    if (!draft || !chrome.storage?.local) return;
+    try {
+      await chrome.storage.local.set({ [SIDEPANEL_DRAFT_STORAGE_KEY]: draft });
+    } catch {}
   }
 
   function promptVaultSelection(count = 0) {
@@ -624,6 +721,14 @@
       return url.protocol === "http:" || url.protocol === "https:" ? url.origin : null;
     } catch {
       return null;
+    }
+  }
+
+  function hostLabel(origin) {
+    try {
+      return new URL(origin).host || origin;
+    } catch {
+      return String(origin || "image website");
     }
   }
 

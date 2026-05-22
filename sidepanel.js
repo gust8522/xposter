@@ -1680,7 +1680,22 @@ console.log("示例代码块");
   }
 
   function remoteHttpImageSegments(parsed = latestParsed) {
-    return (parsed?.segments || []).filter((segment) => segment.type === "image" && isRemoteHttpImageSource(segment.source));
+    const seen = new Set();
+    return remoteHttpImageSegmentsIncludingCover(parsed).filter((segment) => {
+      const source = String(segment.source || "");
+      if (!source || seen.has(source)) return false;
+      seen.add(source);
+      return true;
+    });
+  }
+
+  function remoteHttpImageSegmentsIncludingCover(parsed = latestParsed) {
+    const segments = (parsed?.segments || []).filter((segment) => segment.type === "image" && isRemoteHttpImageSource(segment.source));
+    const cover = String(parsed?.cover || "").trim();
+    if (cover && isRemoteHttpImageSource(cover) && !segments.some((segment) => shared.imageSourcesMatch(segment.source, cover))) {
+      segments.push({ type: "image", source: cover, alt: "cover" });
+    }
+    return segments;
   }
 
   function remoteImageOriginCounts(parsed = latestParsed) {
@@ -1773,6 +1788,17 @@ console.log("示例代码块");
       return `${total} web image(s) checked: ${remoteImageProbeStatus.ok} ready, ${remoteImageProbeStatus.fail} failed.`;
     }
     return "Remote image URLs are allowed, but image upload has not been tried yet.";
+  }
+
+  function remoteImageFailureHint(item = {}) {
+    const error = String(item.error || "");
+    if (/HTTP 401|HTTP 403|HTTP 404|private|expired|blocked|unreachable/i.test(error)) {
+      return "Open the image link in a normal tab. If it loads, click Try image upload again; if it does not load, replace it with a fresh public link.";
+    }
+    if (/timed out|timeout|network|fetch failed|HTTP 429|HTTP 500|HTTP 502|HTTP 503|HTTP 504/i.test(error)) {
+      return "This looks temporary. Click Try image upload again before replacing the link.";
+    }
+    return "Click Try image upload again, or replace this image URL with a public link if it still fails.";
   }
 
   function formatBytes(bytes) {
@@ -1872,7 +1898,7 @@ console.log("示例代码块");
     } catch {}
     const fileName = item.fileName || `image-${item.index}`;
     const error = item.error || "Image download failed";
-    return `Image ${item.index} failed (${fileName}) from ${origin}: ${error}. xPoster recognized the Markdown image, but it will not write image links into X as real uploads until this file can be downloaded.`;
+    return `Image ${item.index} failed (${fileName}) from ${origin}: ${error}. ${remoteImageFailureHint(item)}`;
   }
 
   function isRetryableRemoteImageProbeError(error) {
@@ -4898,23 +4924,45 @@ console.log("示例代码块");
   }
 
   async function prepareSimpleWriteTarget(parsed) {
-    await refreshRemotePermissionStatusBeforeAction(parsed);
-    updatePreflight();
+    const remoteImages = remoteHttpImageSegments(parsed);
+    if (remoteImages.length) {
+      log(`Preparing ${remoteImages.length} web image(s) for upload...`);
+      revealRemotePermissionPanel();
+      const permission = await ensureRemoteImagePermissionsForDraft(parsed, { requestImmediately: true });
+      if (!permission.ok) {
+        revealRemotePermissionPanel();
+        log(permission.error);
+        return {
+          ok: false,
+          reason: permission.error,
+          checks: buildPreflightChecks(),
+          gate: getImportGate(buildPreflightChecks()),
+          targetContext: buildTargetContextEvidence(),
+          remotePermission: permission
+        };
+      }
+      const probe = await probeRemoteImagesForDraft(parsed);
+      if (!probe.ok) {
+        revealRemotePermissionPanel();
+        log(`Image upload check failed: ${probe.error}`);
+        return {
+          ok: false,
+          reason: probe.error || "Some web images could not be downloaded for upload.",
+          checks: buildPreflightChecks(),
+          gate: getImportGate(buildPreflightChecks()),
+          targetContext: buildTargetContextEvidence(),
+          remoteProbe: probe
+        };
+      }
+      log(`${remoteImages.length} web image(s) are ready for X upload.`);
+    } else {
+      await refreshRemotePermissionStatusBeforeAction(parsed);
+      updatePreflight();
+    }
     let checks = buildPreflightChecks();
     const pageScriptCheck = checks.find((check) => check.id === "page-script");
     if (pageScriptCheck?.tone === "error") {
       return { ok: false, reason: pageScriptCheck.detail, checks, targetContext: buildTargetContextEvidence() };
-    }
-    const remoteImages = remoteHttpImageSegments(parsed);
-    if (remoteImages.length) {
-      await refreshRemoteImagePermissionStatus(parsed);
-      const missing = remoteImageOrigins(parsed).filter((origin) => !(remotePermissionStatus.granted || []).includes(origin));
-      if (missing.length) {
-        log(`${remoteImages.length} web image(s) may stay as Markdown links until their image site is allowed.`);
-        revealRemotePermissionPanel();
-      } else {
-        log(`${remoteImages.length} web image(s) will upload if Chrome can download them.`);
-      }
     }
 
     const active = await activeTab();
@@ -5299,6 +5347,20 @@ console.log("示例代码块");
     const stored = await chrome.storage.local.get(STORAGE_DRAFT);
     els.markdown.value = stored[STORAGE_DRAFT] || "";
     analyzeDraft();
+  }
+
+  function installDraftStorageSync() {
+    if (!hasChromeApi() || !chrome.storage?.onChanged) return;
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local" || !changes[STORAGE_DRAFT]) return;
+      const nextDraft = String(changes[STORAGE_DRAFT].newValue || "");
+      if (nextDraft === els.markdown.value) return;
+      els.markdown.value = nextDraft;
+      analyzeDraft();
+      showWorkspacePanel("draft");
+      setDraftDropStatus("Markdown loaded", `${nextDraft.length} characters. Review it, then click Write article.`, "done");
+      log("Markdown draft loaded from the X Article tab.");
+    });
   }
 
   async function restoreVaultState() {
@@ -5878,6 +5940,7 @@ console.log("示例代码块");
   });
   getLiveResultItems().forEach((input) => input.addEventListener("change", saveLiveResultChecks));
   syncPanelLayout();
+  installDraftStorageSync();
   installDraftDropTray();
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
