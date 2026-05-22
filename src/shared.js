@@ -498,7 +498,23 @@
     return lines.join("\n");
   }
 
-  function buildPastePlan(segments, imageResults = new Map(), tableResults = new Map()) {
+  function imageSourcesMatch(left, right) {
+    const leftRaw = String(left || "").trim();
+    const rightRaw = String(right || "").trim();
+    if (!leftRaw || !rightRaw) return false;
+    if (leftRaw === rightRaw) return true;
+    try {
+      const leftUrl = new URL(leftRaw, "https://xposter.local");
+      const rightUrl = new URL(rightRaw, "https://xposter.local");
+      leftUrl.hash = "";
+      rightUrl.hash = "";
+      return decodeURIComponent(leftUrl.href) === decodeURIComponent(rightUrl.href);
+    } catch {
+      return leftRaw.split("#")[0] === rightRaw.split("#")[0];
+    }
+  }
+
+  function buildPastePlan(segments, imageResults = new Map(), tableResults = new Map(), options = {}) {
     const prefix = `__XPOSTER_${Math.random().toString(36).slice(2, 7)}_`;
     let index = 0;
     const html = [];
@@ -521,6 +537,26 @@
       html.push(`<${listTag}>${listItems.map((item) => `<li>${item}</li>`).join("")}</${listTag}>`);
       listTag = null;
       listItems = [];
+    };
+    const addImageOperation = (segment, result, { markerType = "IMAGE", coverOnly = false } = {}) => {
+      const id = marker(markerType);
+      html.push(`<p>${id}</p>`);
+      addBlock("unstyled", id);
+      plan.push({
+        marker: id,
+        op: {
+          type: "image",
+          file: {
+            base64: result.base64,
+            mime: result.mime,
+            fileName: result.fileName,
+            alt: segment.alt || ""
+          },
+          source: segment.source,
+          fallbackText: coverOnly ? "" : imageFallbackMarkdown(segment),
+          coverOnly
+        }
+      });
     };
 
     for (const segment of segments) {
@@ -585,23 +621,7 @@
       if (segment.type === "image") {
         const result = imageResults.get(segment);
         if (result?.ok) {
-          const id = marker("IMAGE");
-          html.push(`<p>${id}</p>`);
-          addBlock("unstyled", id);
-          plan.push({
-            marker: id,
-            op: {
-              type: "image",
-              file: {
-                base64: result.base64,
-                mime: result.mime,
-                fileName: result.fileName,
-                alt: segment.alt || ""
-              },
-              source: segment.source,
-              fallbackText: imageFallbackMarkdown(segment)
-            }
-          });
+          addImageOperation(segment, result);
         } else {
           const fallback = imageFallbackMarkdown(segment);
           html.push(`<p>${escapeHtml(fallback)}</p>`);
@@ -635,6 +655,19 @@
           addBlock("code-block", fallback);
         }
       }
+    }
+
+    const coverSource = String(options.coverSource || "").trim();
+    const coverResult = options.coverResult || null;
+    const coverAlreadyInBody = coverSource && segments.some(
+      (segment) => segment.type === "image" && imageSourcesMatch(segment.source, coverSource)
+    );
+    if (coverSource && coverResult?.ok && !coverAlreadyInBody) {
+      addImageOperation(
+        { type: "image", source: coverSource, alt: "cover" },
+        coverResult,
+        { markerType: "COVER", coverOnly: true }
+      );
     }
 
     flushList();
@@ -944,6 +977,7 @@
     applyLimits,
     buildPastePlan,
     escapeHtml,
+    imageSourcesMatch,
     isLocalImageSource,
     isAbsoluteLocalImageSource,
     guessFileName,

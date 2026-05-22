@@ -39,6 +39,22 @@
     });
   }
 
+  function imageSourcesMatch(left, right) {
+    const leftRaw = String(left || "").trim();
+    const rightRaw = String(right || "").trim();
+    if (!leftRaw || !rightRaw) return false;
+    if (leftRaw === rightRaw) return true;
+    try {
+      const leftUrl = new URL(leftRaw, location.href);
+      const rightUrl = new URL(rightRaw, location.href);
+      leftUrl.hash = "";
+      rightUrl.hash = "";
+      return decodeURIComponent(leftUrl.href) === decodeURIComponent(rightUrl.href);
+    } catch {
+      return leftRaw.split("#")[0] === rightRaw.split("#")[0];
+    }
+  }
+
   function findEditorElement() {
     for (const element of document.querySelectorAll(EDITOR_SELECTOR)) {
       const rect = element.getBoundingClientRect();
@@ -781,7 +797,8 @@
           blockKey: result.blockKey,
           entityKey: result.entityKey,
           mediaId: result.mediaId,
-          source: op.op.source
+          source: op.op.source,
+          coverOnly: Boolean(op.op.coverOnly)
         });
       } else {
         summary.imgFail += 1;
@@ -792,7 +809,7 @@
           fileName: op.op.file?.fileName || null,
           error: result.error || "Image upload failed"
         });
-        replaceMarkerText(draftNode, op.marker, op.op.fallbackText || "[image upload failed]");
+        replaceMarkerText(draftNode, op.marker, op.op.fallbackText || (op.op.coverOnly ? "" : "[image upload failed]"));
         console.warn(LOG, "image failed", result.error);
       }
       draftNode = findDraftStateNode() || draftNode;
@@ -801,7 +818,7 @@
     if (uploads.length) {
       progress("Reordering uploaded media...");
       await sleep(900);
-      const result = relocateImages(draftNode, uploads, protectedAtomicBlocks);
+      const result = relocateImages(draftNode, uploads.filter((upload) => !upload.coverOnly), protectedAtomicBlocks);
       summary.relocatedImages = result.moved;
       await sleep(400);
     }
@@ -828,7 +845,7 @@
         summary.cover.skippedReason = "No article id in URL";
         console.warn(LOG, "cover update skipped: no article id");
       } else {
-        const coverUpload = uploads.find((upload) => upload.source === payload.cover && upload.mediaId);
+        const coverUpload = uploads.find((upload) => imageSourcesMatch(upload.source, payload.cover) && upload.mediaId);
         if (coverUpload) {
           summary.cover.matchedUpload = true;
           summary.cover.mediaIdSuffix = coverUpload.mediaId ? coverUpload.mediaId.slice(-8) : null;
@@ -848,7 +865,7 @@
           }
         } else {
           summary.cover.skippedReason = "Cover source has no uploaded media match";
-          console.warn(LOG, "cover source has no uploaded media match", payload.cover);
+          console.info(LOG, "cover skipped: no uploaded media match", payload.cover);
         }
       }
     }

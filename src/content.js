@@ -293,13 +293,28 @@
       if (!(await waitForMainReady())) throw new Error("X editor bridge is not ready");
 
       const localImages = segments.filter((segment) => segment.type === "image" && shared.isLocalImageSource(segment.source));
-      if (localImages.length) {
-        await ensureVaultForLocalImages(localImages.length);
+      const coverSource = limitedParsed.cover || "";
+      const coverSegment = coverSource && !segments.some(
+        (segment) => segment.type === "image" && shared.imageSourcesMatch(segment.source, coverSource)
+      )
+        ? { type: "image", source: coverSource, alt: "cover" }
+        : null;
+      const coverLocalImage = coverSegment && shared.isLocalImageSource(coverSegment.source) ? coverSegment : null;
+      if (localImages.length || coverLocalImage) {
+        await ensureVaultForLocalImages(localImages.length + (coverLocalImage ? 1 : 0));
       }
       const imageMap = await prepareImages(segments);
+      const coverResult = coverSegment
+        ? await loadImageWithRetry(coverSegment.source, "cover")
+        : null;
       const tableMap = await prepareTables(segments);
-      const mediaFailures = collectMediaFailures(imageMap, "image").concat(collectMediaFailures(tableMap, "table"));
-      const pastePlan = shared.buildPastePlan(segments, imageMap, tableMap);
+      const mediaFailures = collectMediaFailures(imageMap, "image")
+        .concat(coverResult && !coverResult.ok ? collectMediaFailures(new Map([[coverSegment, coverResult]]), "image") : [])
+        .concat(collectMediaFailures(tableMap, "table"));
+      const pastePlan = shared.buildPastePlan(segments, imageMap, tableMap, {
+        coverSource,
+        coverResult
+      });
       const filePayloads = streamImageFilesForMain(pastePlan);
       pastePlan.title = limitedParsed.title || null;
       pastePlan.cover = limitedParsed.cover || null;

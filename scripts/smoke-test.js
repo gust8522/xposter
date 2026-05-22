@@ -66,6 +66,29 @@ const failedRemoteImageMap = new Map(
     .map((segment) => [segment, { ok: false, permissionRequired: true, error: "Chrome permission required" }])
 );
 const remoteFallbackPlan = shared.buildPastePlan(remoteImageParsed.segments, failedRemoteImageMap);
+const frontmatterOnlyCoverDraft = [
+  "---",
+  "title: Cover only",
+  "cover: https://images.example.test/path/cover.png",
+  "---",
+  "",
+  "Body without a repeated image."
+].join("\n");
+const frontmatterOnlyCoverParsed = shared.parseMarkdown(frontmatterOnlyCoverDraft);
+const coverOnlyPlan = shared.buildPastePlan(
+  frontmatterOnlyCoverParsed.segments,
+  new Map(),
+  new Map(),
+  {
+    coverSource: frontmatterOnlyCoverParsed.cover,
+    coverResult: {
+      ok: true,
+      base64: "AA==",
+      mime: "image/png",
+      fileName: "cover.png"
+    }
+  }
+);
 
 assert.equal(parsed.title, "xPoster live smoke test", "frontmatter title should parse");
 assert.ok(parsed.cover, "cover should parse");
@@ -82,6 +105,19 @@ assert.ok(
 assert.ok(
   !remoteFallbackPlan.plain.includes("Chrome permission required"),
   "failed remote image fallback should not write internal permission errors into the article"
+);
+assert.ok(
+  coverOnlyPlan.plan.some(
+    (item) =>
+      item.op.type === "image" &&
+      item.op.coverOnly === true &&
+      item.op.source === "https://images.example.test/path/cover.png"
+  ),
+  "frontmatter-only cover should create a temporary cover upload operation"
+);
+assert.ok(
+  !coverOnlyPlan.plain.includes("![cover]"),
+  "frontmatter-only cover placeholder should not add visible Markdown image text"
 );
 
 const readText = (relativePath) => fs.readFileSync(path.join(root, relativePath), "utf8");
